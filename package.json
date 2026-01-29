@@ -1,0 +1,19 @@
+{
+  "name": "perfect-pixel-check-api",
+  "version": "1.0.0",
+  "description": "API for Perfect Pixel Check tool",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "cors": "^2.8.5",
+    "multer": "^1.4.5-lts.1",
+    "puppeteer": "^22.0.0",
+    "pixelmatch": "^5.3.0",
+    "pngjs": "^7.0.0",
+    "sharp": "^0.33.2"
+  }
+}

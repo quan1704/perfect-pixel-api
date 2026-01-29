@@ -1,0 +1,11 @@
+# Render Blueprint
+services:
+  - type: web
+    name: perfect-pixel-api
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 3001
