@@ -7,10 +7,6 @@ const { PNG } = require('pngjs');
 const sharp = require('sharp');
 const path = require('path');
 const fs = require('fs').promises;
-const Anthropic = require('@anthropic-ai/sdk');
-
-// Initialize Anthropic client (uses ANTHROPIC_API_KEY env variable)
-const anthropic = new Anthropic();
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -263,7 +259,9 @@ app.get('/api/result/:id', (req, res) => {
   res.json(result);
 });
 
-// AI Vision Analysis endpoint
+// AI Vision Analysis endpoint - DISABLED (requires paid API)
+// To enable, add OpenAI or Anthropic SDK and uncomment
+/*
 app.post('/api/analyze', upload.single('design'), async (req, res) => {
   let browser = null;
 
@@ -337,23 +335,13 @@ app.post('/api/analyze', upload.single('design'), async (req, res) => {
       .png()
       .toBuffer();
 
-    // Convert to base64 for Claude API
+    // Convert to base64 for OpenAI API
     const designBase64 = designResized.toString('base64');
     const screenshotBase64 = screenshotResized.toString('base64');
 
-    console.log('[AI Analyze] Sending images to Claude Vision API...');
+    console.log('[AI Analyze] Sending images to OpenAI GPT-4 Vision API...');
 
-    // Call Claude Vision API
-    const message = await anthropic.messages.create({
-      model: 'claude-sonnet-4-20250514',
-      max_tokens: 4096,
-      messages: [
-        {
-          role: 'user',
-          content: [
-            {
-              type: 'text',
-              text: `You are a professional UI/UX quality assurance expert. Compare these two images:
+    const prompt = `You are a professional UI/UX quality assurance expert. Compare these two images:
 1. First image: Design mockup (the intended design)
 2. Second image: Website screenshot (the actual implementation)
 
@@ -387,22 +375,29 @@ Focus on:
 4. LAYOUT: Element positions, alignments, widths, heights
 5. IMAGES/ICONS: Size, position, presence
 
-Be precise with pixel estimates where possible. If something looks like it's off by about 5px, say "~5px".`
-            },
+Be precise with pixel estimates where possible. If something looks like it's off by about 5px, say "~5px".`;
+
+    // Call OpenAI GPT-4 Vision API
+    const response = await openai.chat.completions.create({
+      model: 'gpt-4o',
+      max_tokens: 4096,
+      messages: [
+        {
+          role: 'user',
+          content: [
+            { type: 'text', text: prompt },
             {
-              type: 'image',
-              source: {
-                type: 'base64',
-                media_type: 'image/png',
-                data: designBase64
+              type: 'image_url',
+              image_url: {
+                url: `data:image/png;base64,${designBase64}`,
+                detail: 'high'
               }
             },
             {
-              type: 'image',
-              source: {
-                type: 'base64',
-                media_type: 'image/png',
-                data: screenshotBase64
+              type: 'image_url',
+              image_url: {
+                url: `data:image/png;base64,${screenshotBase64}`,
+                detail: 'high'
               }
             }
           ]
@@ -410,10 +405,10 @@ Be precise with pixel estimates where possible. If something looks like it's off
       ]
     });
 
-    console.log('[AI Analyze] Received response from Claude');
+    console.log('[AI Analyze] Received response from OpenAI');
 
-    // Extract the text response
-    const aiResponse = message.content[0].text;
+    // Extract the text response (OpenAI format)
+    const aiResponse = response.choices[0].message.content;
 
     // Try to parse JSON from response
     let analysisResult;
@@ -457,8 +452,10 @@ Be precise with pixel estimates where possible. If something looks like it's off
 
     let errorMessage = error.message || 'An error occurred during AI analysis';
 
-    if (error.message?.includes('API key')) {
-      errorMessage = 'Invalid or missing Anthropic API key. Please check your configuration.';
+    if (error.message?.includes('API key') || error.message?.includes('apiKey')) {
+      errorMessage = 'Invalid or missing OpenAI API key. Please check OPENAI_API_KEY environment variable.';
+    } else if (error.message?.includes('quota') || error.message?.includes('rate limit')) {
+      errorMessage = 'OpenAI API quota exceeded or rate limited. Please try again later.';
     }
 
     res.status(500).json({
@@ -466,6 +463,7 @@ Be precise with pixel estimates where possible. If something looks like it's off
     });
   }
 });
+*/
 
 // CSS Inspector endpoint
 app.post('/api/inspect', express.json(), async (req, res) => {
