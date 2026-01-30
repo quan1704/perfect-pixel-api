@@ -11,9 +11,17 @@ const fs = require('fs').promises;
 const app = express();
 const PORT = process.env.PORT || 3001;
 
-// Middleware
-app.use(cors());
+// Middleware - CORS configuration
+app.use(cors({
+  origin: '*',
+  methods: ['GET', 'POST', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
+  credentials: false
+}));
 app.use(express.json());
+
+// Handle preflight requests
+app.options('*', cors());
 
 // Configure multer for file uploads
 const storage = multer.memoryStorage();
@@ -64,8 +72,8 @@ app.post('/api/compare', upload.single('design'), async (req, res) => {
       return res.status(400).json({ error: 'URL is required' });
     }
 
-    const viewportWidth = parseInt(width) || 1920;
-    const viewportHeight = parseInt(height) || 1080;
+    const viewportWidth = Math.min(parseInt(width) || 1920, 3840);
+    const viewportHeight = Math.min(parseInt(height) || 1080, 15000); // Max 15000px to prevent memory issues
 
     console.log(`[Compare] Starting comparison for ${url} at ${viewportWidth}x${viewportHeight}`);
 
