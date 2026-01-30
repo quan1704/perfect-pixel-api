@@ -119,10 +119,14 @@ app.post('/api/compare', upload.single('design'), async (req, res) => {
     // Wait a bit for any animations/lazy loading
     await new Promise(resolve => setTimeout(resolve, 2000));
 
+    // Determine if full page screenshot is needed (height > 2000px)
+    const isFullPage = viewportHeight > 2000;
+    console.log(`[Compare] Taking ${isFullPage ? 'full page' : 'viewport'} screenshot...`);
+
     // Take screenshot
     const screenshotBuffer = await page.screenshot({
       type: 'png',
-      fullPage: false
+      fullPage: isFullPage
     });
 
     await browser.close();
@@ -130,15 +134,26 @@ app.post('/api/compare', upload.single('design'), async (req, res) => {
 
     console.log('[Compare] Screenshot captured, processing images...');
 
-    // Process design image - convert to PNG and resize to match viewport
+    // Get actual dimensions from the screenshot
+    const screenshotMeta = await sharp(screenshotBuffer).metadata();
+    const actualWidth = screenshotMeta.width;
+    const actualHeight = screenshotMeta.height;
+
+    // For full page, use actual screenshot dimensions
+    const compareWidth = isFullPage ? actualWidth : viewportWidth;
+    const compareHeight = isFullPage ? actualHeight : viewportHeight;
+
+    console.log(`[Compare] Comparing at ${compareWidth}x${compareHeight}`);
+
+    // Process design image - convert to PNG and resize to match
     const designProcessed = await sharp(designBuffer)
-      .resize(viewportWidth, viewportHeight, { fit: 'contain', background: { r: 255, g: 255, b: 255, alpha: 1 } })
+      .resize(compareWidth, compareHeight, { fit: 'cover', position: 'top', background: { r: 255, g: 255, b: 255, alpha: 1 } })
       .png()
       .toBuffer();
 
     // Process screenshot
     const screenshotProcessed = await sharp(screenshotBuffer)
-      .resize(viewportWidth, viewportHeight, { fit: 'contain', background: { r: 255, g: 255, b: 255, alpha: 1 } })
+      .resize(compareWidth, compareHeight, { fit: 'cover', position: 'top', background: { r: 255, g: 255, b: 255, alpha: 1 } })
       .png()
       .toBuffer();
 
@@ -147,25 +162,25 @@ app.post('/api/compare', upload.single('design'), async (req, res) => {
     const screenshotPng = PNG.sync.read(screenshotProcessed);
 
     // Create diff image
-    const diffPng = new PNG({ width: viewportWidth, height: viewportHeight });
+    const diffPng = new PNG({ width: compareWidth, height: compareHeight });
 
     const mismatchedPixels = pixelmatch(
       designPng.data,
       screenshotPng.data,
       diffPng.data,
-      viewportWidth,
-      viewportHeight,
+      compareWidth,
+      compareHeight,
       { threshold: 0.1, includeAA: false }
     );
 
-    const totalPixels = viewportWidth * viewportHeight;
+    const totalPixels = compareWidth * compareHeight;
     const matchPercentage = ((totalPixels - mismatchedPixels) / totalPixels * 100).toFixed(2);
     const diffPercentage = (mismatchedPixels / totalPixels * 100).toFixed(2);
 
     console.log(`[Compare] Analysis complete. Match: ${matchPercentage}%, Diff: ${diffPercentage}%`);
 
     // Analyze differences by region
-    const regions = analyzeRegions(diffPng.data, viewportWidth, viewportHeight);
+    const regions = analyzeRegions(diffPng.data, compareWidth, compareHeight);
 
     // Convert images to base64
     const diffBuffer = PNG.sync.write(diffPng);
@@ -181,7 +196,8 @@ app.post('/api/compare', upload.single('design'), async (req, res) => {
         mismatchedPixels,
         matchPercentage: parseFloat(matchPercentage),
         diffPercentage: parseFloat(diffPercentage),
-        viewport: { width: viewportWidth, height: viewportHeight }
+        viewport: { width: compareWidth, height: compareHeight },
+        isFullPage
       },
       regions
     };
