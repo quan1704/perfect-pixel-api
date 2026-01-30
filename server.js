@@ -259,6 +259,231 @@ app.get('/api/result/:id', (req, res) => {
   res.json(result);
 });
 
+// CSS Inspector endpoint
+app.post('/api/inspect', express.json(), async (req, res) => {
+  let browser = null;
+
+  try {
+    const { url, username, password, selector } = req.body;
+
+    if (!url) {
+      return res.status(400).json({ error: 'URL is required' });
+    }
+
+    console.log(`[Inspect] Starting CSS inspection for ${url}`);
+
+    // Launch browser
+    browser = await puppeteer.launch({
+      headless: 'new',
+      args: [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage',
+        '--disable-gpu',
+        '--single-process'
+      ],
+      timeout: 60000
+    });
+
+    const page = await browser.newPage();
+    await page.setViewport({ width: 1920, height: 1080 });
+
+    // Handle HTTP Basic Auth
+    if (username && password) {
+      await page.authenticate({ username, password });
+    }
+
+    // Navigate to URL
+    await page.goto(url, {
+      waitUntil: 'networkidle2',
+      timeout: 60000
+    });
+
+    // Wait for page to fully render
+    await new Promise(resolve => setTimeout(resolve, 2000));
+
+    // Extract CSS information from all visible elements
+    const cssData = await page.evaluate((targetSelector) => {
+      const results = {
+        typography: [],
+        colors: [],
+        spacing: [],
+        elements: []
+      };
+
+      // Helper to get computed styles
+      const getStyles = (el) => {
+        const computed = window.getComputedStyle(el);
+        return {
+          fontFamily: computed.fontFamily,
+          fontSize: computed.fontSize,
+          fontWeight: computed.fontWeight,
+          lineHeight: computed.lineHeight,
+          letterSpacing: computed.letterSpacing,
+          color: computed.color,
+          backgroundColor: computed.backgroundColor,
+          marginTop: computed.marginTop,
+          marginRight: computed.marginRight,
+          marginBottom: computed.marginBottom,
+          marginLeft: computed.marginLeft,
+          paddingTop: computed.paddingTop,
+          paddingRight: computed.paddingRight,
+          paddingBottom: computed.paddingBottom,
+          paddingLeft: computed.paddingLeft,
+          width: computed.width,
+          height: computed.height,
+          display: computed.display,
+          position: computed.position,
+          borderRadius: computed.borderRadius
+        };
+      };
+
+      // Get element selector path
+      const getSelector = (el) => {
+        if (el.id) return `#${el.id}`;
+        if (el.className && typeof el.className === 'string') {
+          const classes = el.className.trim().split(/\s+/).filter(c => c).slice(0, 2);
+          if (classes.length) return `${el.tagName.toLowerCase()}.${classes.join('.')}`;
+        }
+        return el.tagName.toLowerCase();
+      };
+
+      // Get bounding rect
+      const getPosition = (el) => {
+        const rect = el.getBoundingClientRect();
+        return {
+          top: Math.round(rect.top),
+          left: Math.round(rect.left),
+          width: Math.round(rect.width),
+          height: Math.round(rect.height)
+        };
+      };
+
+      // Determine which elements to analyze
+      let elements;
+      if (targetSelector) {
+        elements = document.querySelectorAll(targetSelector);
+      } else {
+        // Get important visible elements
+        elements = document.querySelectorAll('h1, h2, h3, h4, h5, h6, p, a, button, span, div, section, header, footer, nav, img, input, label, li, td, th');
+      }
+
+      const fontMap = new Map();
+      const colorMap = new Map();
+      const spacingSet = new Set();
+
+      elements.forEach((el, index) => {
+        // Skip hidden elements
+        const rect = el.getBoundingClientRect();
+        if (rect.width === 0 || rect.height === 0) return;
+        if (index > 200) return; // Limit to prevent overload
+
+        const styles = getStyles(el);
+        const selector = getSelector(el);
+        const position = getPosition(el);
+        const text = el.innerText?.substring(0, 50) || '';
+
+        // Collect typography
+        const fontKey = `${styles.fontFamily}|${styles.fontSize}|${styles.fontWeight}`;
+        if (!fontMap.has(fontKey)) {
+          fontMap.set(fontKey, {
+            fontFamily: styles.fontFamily,
+            fontSize: styles.fontSize,
+            fontWeight: styles.fontWeight,
+            lineHeight: styles.lineHeight,
+            count: 0,
+            examples: []
+          });
+        }
+        const fontEntry = fontMap.get(fontKey);
+        fontEntry.count++;
+        if (fontEntry.examples.length < 3) {
+          fontEntry.examples.push({ selector, text: text.substring(0, 30) });
+        }
+
+        // Collect colors
+        const colorKey = styles.color;
+        if (!colorMap.has(colorKey) && colorKey !== 'rgba(0, 0, 0, 0)') {
+          colorMap.set(colorKey, { color: colorKey, count: 0, examples: [] });
+        }
+        if (colorMap.has(colorKey)) {
+          const colorEntry = colorMap.get(colorKey);
+          colorEntry.count++;
+          if (colorEntry.examples.length < 3) {
+            colorEntry.examples.push(selector);
+          }
+        }
+
+        // Collect unique spacing values
+        ['marginTop', 'marginBottom', 'paddingTop', 'paddingBottom'].forEach(prop => {
+          const val = parseInt(styles[prop]);
+          if (val > 0) spacingSet.add(val);
+        });
+
+        // Add to elements list (limit to important ones)
+        if (['H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'P', 'BUTTON', 'A', 'IMG'].includes(el.tagName) ||
+            (el.className && typeof el.className === 'string' && el.className.includes('title'))) {
+          results.elements.push({
+            tag: el.tagName.toLowerCase(),
+            selector,
+            text: text.substring(0, 50),
+            position,
+            styles: {
+              fontFamily: styles.fontFamily?.split(',')[0]?.replace(/['"]/g, '').trim(),
+              fontSize: styles.fontSize,
+              fontWeight: styles.fontWeight,
+              lineHeight: styles.lineHeight,
+              color: styles.color,
+              backgroundColor: styles.backgroundColor,
+              margin: `${styles.marginTop} ${styles.marginRight} ${styles.marginBottom} ${styles.marginLeft}`,
+              padding: `${styles.paddingTop} ${styles.paddingRight} ${styles.paddingBottom} ${styles.paddingLeft}`
+            }
+          });
+        }
+      });
+
+      // Convert maps to arrays
+      results.typography = Array.from(fontMap.values())
+        .sort((a, b) => b.count - a.count)
+        .slice(0, 20);
+
+      results.colors = Array.from(colorMap.values())
+        .sort((a, b) => b.count - a.count)
+        .slice(0, 20);
+
+      results.spacing = Array.from(spacingSet).sort((a, b) => a - b);
+
+      return results;
+    }, selector);
+
+    await browser.close();
+    browser = null;
+
+    console.log(`[Inspect] Found ${cssData.typography.length} font styles, ${cssData.colors.length} colors, ${cssData.elements.length} elements`);
+
+    res.json({
+      url,
+      timestamp: Date.now(),
+      ...cssData
+    });
+
+  } catch (error) {
+    console.error('[Inspect] Error:', error);
+
+    if (browser) {
+      try {
+        await browser.close();
+      } catch (e) {
+        console.error('[Inspect] Error closing browser:', e);
+      }
+    }
+
+    res.status(500).json({
+      error: error.message || 'An error occurred during inspection'
+    });
+  }
+});
+
 // Analyze regions of difference
 function analyzeRegions(diffData, width, height) {
   const gridSize = 4; // Divide into 4x4 grid
