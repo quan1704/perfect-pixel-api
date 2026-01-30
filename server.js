@@ -19,7 +19,7 @@ app.use(express.json());
 const storage = multer.memoryStorage();
 const upload = multer({
   storage,
-  limits: { fileSize: 10 * 1024 * 1024 }, // 10MB limit
+  limits: { fileSize: 20 * 1024 * 1024 }, // 20MB limit
   fileFilter: (req, file, cb) => {
     const allowedTypes = ['image/png', 'image/jpeg', 'image/webp'];
     if (allowedTypes.includes(file.mimetype)) {
@@ -76,8 +76,16 @@ app.post('/api/compare', upload.single('design'), async (req, res) => {
         '--no-sandbox',
         '--disable-setuid-sandbox',
         '--disable-dev-shm-usage',
-        '--disable-gpu'
-      ]
+        '--disable-gpu',
+        '--disable-software-rasterizer',
+        '--disable-extensions',
+        '--disable-background-networking',
+        '--disable-default-apps',
+        '--disable-sync',
+        '--no-first-run',
+        '--single-process'
+      ],
+      timeout: 60000
     });
 
     const page = await browser.newPage();
@@ -90,14 +98,26 @@ app.post('/api/compare', upload.single('design'), async (req, res) => {
       await page.authenticate({ username, password });
     }
 
-    // Navigate to URL
-    await page.goto(url, {
-      waitUntil: 'networkidle2',
-      timeout: 30000
-    });
+    // Navigate to URL with retry
+    console.log(`[Compare] Navigating to ${url}...`);
+    try {
+      await page.goto(url, {
+        waitUntil: 'networkidle2',
+        timeout: 90000 // 90 seconds
+      });
+    } catch (navError) {
+      // If networkidle2 fails, try with 'load' event
+      console.log('[Compare] networkidle2 timeout, retrying with load event...');
+      await page.goto(url, {
+        waitUntil: 'load',
+        timeout: 90000
+      });
+      // Wait extra time for content
+      await new Promise(resolve => setTimeout(resolve, 3000));
+    }
 
     // Wait a bit for any animations/lazy loading
-    await new Promise(resolve => setTimeout(resolve, 1000));
+    await new Promise(resolve => setTimeout(resolve, 2000));
 
     // Take screenshot
     const screenshotBuffer = await page.screenshot({
@@ -175,11 +195,32 @@ app.post('/api/compare', upload.single('design'), async (req, res) => {
     console.error('[Compare] Error:', error);
 
     if (browser) {
-      await browser.close();
+      try {
+        await browser.close();
+      } catch (e) {
+        console.error('[Compare] Error closing browser:', e);
+      }
+    }
+
+    // Better error messages
+    let errorMessage = error.message || 'An error occurred during comparison';
+
+    if (error.message?.includes('net::ERR_NAME_NOT_RESOLVED')) {
+      errorMessage = 'Could not resolve domain. Please check the URL.';
+    } else if (error.message?.includes('net::ERR_CONNECTION_REFUSED')) {
+      errorMessage = 'Connection refused. The server may be down.';
+    } else if (error.message?.includes('net::ERR_CONNECTION_TIMED_OUT')) {
+      errorMessage = 'Connection timed out. The server is too slow to respond.';
+    } else if (error.message?.includes('Navigation timeout')) {
+      errorMessage = 'Page took too long to load. Try a simpler page or check your connection.';
+    } else if (error.message?.includes('net::ERR_CERT')) {
+      errorMessage = 'SSL certificate error. The site may have an invalid certificate.';
+    } else if (error.message?.includes('401') || error.message?.includes('Unauthorized')) {
+      errorMessage = 'Authentication failed. Please check username and password.';
     }
 
     res.status(500).json({
-      error: error.message || 'An error occurred during comparison',
+      error: errorMessage,
       details: process.env.NODE_ENV === 'development' ? error.stack : undefined
     });
   }
