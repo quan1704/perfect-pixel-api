@@ -7,6 +7,10 @@ const { PNG } = require('pngjs');
 const sharp = require('sharp');
 const path = require('path');
 const fs = require('fs').promises;
+const Anthropic = require('@anthropic-ai/sdk');
+
+// Initialize Anthropic client (uses ANTHROPIC_API_KEY env variable)
+const anthropic = new Anthropic();
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -257,6 +261,210 @@ app.get('/api/result/:id', (req, res) => {
     return res.status(404).json({ error: 'Result not found or expired' });
   }
   res.json(result);
+});
+
+// AI Vision Analysis endpoint
+app.post('/api/analyze', upload.single('design'), async (req, res) => {
+  let browser = null;
+
+  try {
+    const { url, username, password, width, height } = req.body;
+    const designBuffer = req.file?.buffer;
+
+    // Validation
+    if (!designBuffer) {
+      return res.status(400).json({ error: 'Design image is required' });
+    }
+    if (!url) {
+      return res.status(400).json({ error: 'URL is required' });
+    }
+
+    const viewportWidth = Math.min(parseInt(width) || 1920, 3840);
+    const viewportHeight = Math.min(parseInt(height) || 1080, 15000);
+
+    console.log(`[AI Analyze] Starting analysis for ${url} at ${viewportWidth}x${viewportHeight}`);
+
+    // Launch browser and take screenshot
+    browser = await puppeteer.launch({
+      headless: 'new',
+      args: [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage',
+        '--disable-gpu',
+        '--single-process'
+      ],
+      timeout: 60000
+    });
+
+    const page = await browser.newPage();
+    await page.setViewport({ width: viewportWidth, height: viewportHeight });
+
+    if (username && password) {
+      await page.authenticate({ username, password });
+    }
+
+    console.log(`[AI Analyze] Navigating to ${url}...`);
+    await page.goto(url, {
+      waitUntil: 'networkidle2',
+      timeout: 90000
+    });
+
+    await new Promise(resolve => setTimeout(resolve, 2000));
+
+    // Determine if full page screenshot is needed
+    const isFullPage = viewportHeight > 2000;
+    const screenshotBuffer = await page.screenshot({
+      type: 'png',
+      fullPage: isFullPage
+    });
+
+    await browser.close();
+    browser = null;
+
+    console.log('[AI Analyze] Screenshot captured, preparing images for AI analysis...');
+
+    // Resize images to reasonable size for AI analysis (max 1568px as per Claude's recommendation)
+    const maxDimension = 1568;
+
+    const designResized = await sharp(designBuffer)
+      .resize(maxDimension, maxDimension, { fit: 'inside', withoutEnlargement: true })
+      .png()
+      .toBuffer();
+
+    const screenshotResized = await sharp(screenshotBuffer)
+      .resize(maxDimension, maxDimension, { fit: 'inside', withoutEnlargement: true })
+      .png()
+      .toBuffer();
+
+    // Convert to base64 for Claude API
+    const designBase64 = designResized.toString('base64');
+    const screenshotBase64 = screenshotResized.toString('base64');
+
+    console.log('[AI Analyze] Sending images to Claude Vision API...');
+
+    // Call Claude Vision API
+    const message = await anthropic.messages.create({
+      model: 'claude-sonnet-4-20250514',
+      max_tokens: 4096,
+      messages: [
+        {
+          role: 'user',
+          content: [
+            {
+              type: 'text',
+              text: `You are a professional UI/UX quality assurance expert. Compare these two images:
+1. First image: Design mockup (the intended design)
+2. Second image: Website screenshot (the actual implementation)
+
+Analyze and report ALL differences you can find. Be very specific and detailed.
+
+Please provide your analysis in the following JSON format:
+{
+  "overallMatch": "percentage estimate (e.g., 85%)",
+  "summary": "Brief overall assessment",
+  "differences": [
+    {
+      "element": "Element name/description",
+      "category": "spacing|typography|color|layout|image|other",
+      "severity": "critical|major|minor",
+      "designValue": "What it should be",
+      "actualValue": "What it actually is",
+      "pixelDifference": "Estimated px difference if applicable",
+      "location": "Where on the page (top/middle/bottom, left/center/right)",
+      "suggestion": "How to fix"
+    }
+  ],
+  "matches": [
+    "List of things that match correctly"
+  ]
+}
+
+Focus on:
+1. SPACING: Margins, paddings, gaps between elements (estimate px differences)
+2. TYPOGRAPHY: Font family, size, weight, line-height, letter-spacing
+3. COLORS: Text colors, background colors, border colors
+4. LAYOUT: Element positions, alignments, widths, heights
+5. IMAGES/ICONS: Size, position, presence
+
+Be precise with pixel estimates where possible. If something looks like it's off by about 5px, say "~5px".`
+            },
+            {
+              type: 'image',
+              source: {
+                type: 'base64',
+                media_type: 'image/png',
+                data: designBase64
+              }
+            },
+            {
+              type: 'image',
+              source: {
+                type: 'base64',
+                media_type: 'image/png',
+                data: screenshotBase64
+              }
+            }
+          ]
+        }
+      ]
+    });
+
+    console.log('[AI Analyze] Received response from Claude');
+
+    // Extract the text response
+    const aiResponse = message.content[0].text;
+
+    // Try to parse JSON from response
+    let analysisResult;
+    try {
+      // Find JSON in the response
+      const jsonMatch = aiResponse.match(/\{[\s\S]*\}/);
+      if (jsonMatch) {
+        analysisResult = JSON.parse(jsonMatch[0]);
+      } else {
+        analysisResult = { rawResponse: aiResponse };
+      }
+    } catch (parseError) {
+      console.error('[AI Analyze] Failed to parse JSON:', parseError);
+      analysisResult = { rawResponse: aiResponse };
+    }
+
+    // Return results with images
+    const result = {
+      id: Date.now().toString(36) + Math.random().toString(36).substr(2),
+      timestamp: Date.now(),
+      url,
+      viewport: { width: viewportWidth, height: viewportHeight },
+      designImage: `data:image/png;base64,${designBase64}`,
+      screenshotImage: `data:image/png;base64,${screenshotBase64}`,
+      analysis: analysisResult
+    };
+
+    resultsStore.set(result.id, result);
+    res.json(result);
+
+  } catch (error) {
+    console.error('[AI Analyze] Error:', error);
+
+    if (browser) {
+      try {
+        await browser.close();
+      } catch (e) {
+        console.error('[AI Analyze] Error closing browser:', e);
+      }
+    }
+
+    let errorMessage = error.message || 'An error occurred during AI analysis';
+
+    if (error.message?.includes('API key')) {
+      errorMessage = 'Invalid or missing Anthropic API key. Please check your configuration.';
+    }
+
+    res.status(500).json({
+      error: errorMessage
+    });
+  }
 });
 
 // CSS Inspector endpoint
